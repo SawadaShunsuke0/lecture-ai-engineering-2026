@@ -6,6 +6,7 @@
     uv run python -m app.agent --graph --trace "LoRAとQLoRAの違いは？"  # 検索からグラフをたどって回答
     uv run python -m app.agent --tree --trace "LoRAとQLoRAの違いは？"  # 目次をたどって回答
     uv run python -m app.agent --full-context --trace "LoRAとQLoRAの違いは？"  # 全資料を一度に渡す
+    uv run python -m app.agent --glossary --trace "LoRAとは？"   # 第3回: 用語集・確認問題・学習記録のエージェント
     uv run python -m app.agent --mcp --trace "LoRAとは？"        # 第5回: ツールを MCP サーバーから受け取る
     uv run python -m app.agent --mcp --list-tools               # 第5回: モデルに見えるツール一覧（APIキー不要）
 
@@ -21,7 +22,7 @@ from pathlib import Path
 from contextlib import nullcontext
 from time import perf_counter
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -76,12 +77,29 @@ FULL_CONTEXT_INSTRUCTIONS = """\
 
 FULL_CONTEXT_PROMPT = "<資料>\n{materials}\n</資料>\n\n質問: {question}"
 
+# 第3回 宿題: 用語集・確認問題・学習記録を使うエージェント（--glossary で使う）
+GLOSSARY_INSTRUCTIONS = """\
+あなたはAIエンジニアリング講座（AIE2026）の学習支援エージェントです。
+- 用語や講座に固有のことを答える前に、必ず search_glossary で用語集を確認する。
+- 回の内容を聞かれたら get_lecture_summary を使う。
+- 確認問題を出してほしいときは make_quiz を使う。
+- 学習内容を記録するよう求められたら save_learning_log を使う。
+- 用語集に見つからないことは、推測で断定せず「用語集にはない」と伝える。
+- 回答の最後に、関係する回（第N回）を示す。
+- 宿題の答えそのものは書かず、考え方のヒントで導く。
+"""
+
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
 agent = Agent(instructions=INSTRUCTIONS)
 agent.tool_plain(tools.search_materials)
 
-# TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
+# 第3回 宿題: 用語集エージェント。保存は取り消しにくい操作なので、実行前に利用者の承認を求める
+glossary_agent = Agent(instructions=GLOSSARY_INSTRUCTIONS, output_type=[str, DeferredToolRequests])
+glossary_agent.tool_plain(tools.search_glossary)
+glossary_agent.tool_plain(tools.get_lecture_summary)
+glossary_agent.tool_plain(tools.make_quiz)
+glossary_agent.tool_plain(tools.save_learning_log, requires_approval=True)
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -136,6 +154,25 @@ def print_tools(target: Agent) -> None:
         print(f"  引数: {json.dumps(params, ensure_ascii=False)}")
 
 
+def resolve_approvals(target: Agent, result, model):
+    """第3回: 承認待ちのツール呼び出しを利用者に確認し、その結果を渡して続きを実行する。"""
+    deferred_results = DeferredToolResults()
+    for call in result.output.approvals:
+        args_summary = json.dumps(call.args_as_dict(), ensure_ascii=False)
+        answer = input(
+            f"保存してよいですか？ {call.tool_name}{args_summary} [y/N]: "
+        ).strip().lower()
+        deferred_results.approvals[call.tool_call_id] = (
+            True if answer in {"y", "yes", "はい"}
+            else ToolDenied("利用者が保存を拒否しました。")
+        )
+    return target.run_sync(
+        message_history=result.all_messages(),
+        deferred_tool_results=deferred_results,
+        model=model,
+    )
+
+
 def print_trace(result, elapsed_seconds: float | None = None) -> None:
     """どのツールが、どの引数で呼ばれ、何を返したかを表示する。"""
     print("\n--- trace ---")
@@ -182,10 +219,16 @@ def main() -> None:
     modes.add_argument("--graph", action="store_true", help="検索結果からグラフをたどり、候補ページを読んで答える")
     modes.add_argument("--tree", action="store_true", help="目次をたどり、必要なページを読んで答える")
     modes.add_argument("--full-context", action="store_true", help="検索せず、lectures.jsonの全資料を一度に渡す")
+    modes.add_argument("--glossary", action="store_true", help="第3回: 用語集・確認問題・学習記録のツールを使う")
     parser.add_argument("--list-tools", action="store_true", help="モデルに見えるツール一覧を表示して終了する（APIキー不要）")
     args = parser.parse_args()
 
-    target = build_mcp_agent() if args.mcp else agent
+    if args.mcp:
+        target = build_mcp_agent()
+    elif args.glossary:
+        target = glossary_agent
+    else:
+        target = agent
     mode = nullcontext()
     if args.tree:
         mode = target.override(instructions=TREE_INSTRUCTIONS, tools=[tools.browse_tree])
@@ -214,7 +257,10 @@ def main() -> None:
                     instructions=FULL_CONTEXT_INSTRUCTIONS, prompt_template=FULL_CONTEXT_PROMPT,
                 )
             else:
-                result = target.run_sync(args.question, model=build_model())
+                model = build_model()
+                result = target.run_sync(args.question, model=model)
+                if isinstance(result.output, DeferredToolRequests):
+                    result = resolve_approvals(target, result, model)
         except ModelHTTPError as e:
             print(api_error_message(e.status_code, str(e.body)[:200]))
             raise SystemExit(1)
