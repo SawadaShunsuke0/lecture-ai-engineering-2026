@@ -21,13 +21,13 @@ from app import tools
 # サーバーの名前と説明。クライアントに表示される（設定ファイル側のキー "glossary" とは別物）
 server = MCPServer(
     "aie2026-glossary",
-    instructions="AIE2026（AIエンジニアリング実践講座）の用語集と各回の要点を提供する。",
+    instructions="AIE2026（AIエンジニアリング実践講座）の用語集、各回の要点、確認問題を提供する。",
 )
 
 # 第3回と同じ関数を、そのまま MCP のツールとして公開する。docstring と型ヒントが説明文になる
 server.tool()(tools.search_glossary)
-
-# TODO(宿題・基礎): get_lecture_summary も公開しよう
+server.tool()(tools.get_lecture_summary)
+server.tool()(tools.make_quiz)
 
 
 def main() -> None:
