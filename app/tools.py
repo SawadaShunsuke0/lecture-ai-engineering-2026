@@ -136,10 +136,23 @@ def make_quiz(lecture: int) -> str:
 
     「第2回の確認問題を出して」のように、復習用の問題を求められたときに使う。
     """
-    candidates = [entry for entry in load_glossary() if entry["lecture"] == lecture]
+    lecture_dir = DATA_DIR / "lectures"
+    if not (lecture_dir / f"{lecture:02d}.md").exists():
+        available_lectures = sorted(
+            int(path.stem) for path in lecture_dir.glob("*.md") if path.stem.isdecimal()
+        )
+        if available_lectures:
+            available = "、".join(f"第{number}回" for number in available_lectures)
+            message = f"第{lecture}回は存在しません。用意されている回: {available}。"
+        else:
+            message = f"第{lecture}回は存在しません。講義データがありません。"
+        return json.dumps({"error": message}, ensure_ascii=False)
+
+    glossary = load_glossary()
+    candidates = [entry for entry in glossary if entry["lecture"] == lecture]
     if not candidates:
         return json.dumps(
-            {"error": f"第{lecture}回に確認問題として使える用語がありません。"},
+            {"error": f"第{lecture}回は存在しますが、クイズに使える用語が用語集に登録されていません。"},
             ensure_ascii=False,
         )
 
